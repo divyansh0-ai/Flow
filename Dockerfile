@@ -17,12 +17,18 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# git is required at runtime: the agentic loop clones the repository under
+# repair into a temporary workspace so it can run its test suite.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first for better build-cache reuse.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source.
-COPY agent.py main.py ./
+COPY agent.py main.py agentic.py workspace.py github_client.py ./
 
 # Run as a non-root user (Cloud Run best practice).
 RUN useradd --create-home --uid 1000 appuser \
