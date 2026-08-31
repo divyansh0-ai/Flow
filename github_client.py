@@ -1,7 +1,7 @@
 """github_client.py — Real GitHub REST API integration.
 
-Turns the Repo Health Taskmaster from a demo into an agent that operates on
-live repositories. It can:
+Turns the Flow Agent from a demo into an agent that operates on live
+repositories. It can:
 
   * read real file contents from a repo (so the agent analyzes actual code),
   * create a fix branch,
@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-logger = logging.getLogger("taskmaster.github")
+logger = logging.getLogger("flow.github")
 
 GITHUB_API_BASE: str = os.getenv("GITHUB_API_BASE", "https://api.github.com")
 GITHUB_TOKEN: Optional[str] = os.getenv("GITHUB_TOKEN")
@@ -61,7 +61,7 @@ class GitHubClient:
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "repo-health-taskmaster",
+                "User-Agent": "flow-agent",
             }
         )
 
@@ -298,7 +298,7 @@ def build_pr_body(
 ) -> str:
     """Compose a descriptive pull-request body for an approved patch."""
     return (
-        f"## 🩺 Automated fix from Repo Health Taskmaster\n\n"
+        f"## 🩺 Automated fix from Flow Agent\n\n"
         f"**Summary:** {summary}\n\n"
         f"### Root cause\n{root_cause}\n\n"
         f"### Agent confidence\n`{confidence:.2f}`\n\n"

@@ -54,7 +54,7 @@ before taking any outward action. Nothing gets "pushed" until a human says yes.
                                                    │
                             ┌──────────────────────▼───────────────────────┐
                             │            Cloud Firestore                    │
-                            │   collection: repo_health_tasks               │
+                            │   collection: flow_agent_tasks               │
                             │   fields: status, patch, approval_token,      │
                             │           history[] (full audit trail)        │
                             └──────────────────────┬───────────────────────┘
@@ -127,10 +127,10 @@ flow/
 | `GOOGLE_API_KEY`         | Gemini API key (or `GEMINI_API_KEY`)        | — (falls back)         |
 | `GOOGLE_CLOUD_PROJECT`   | GCP project id for Firestore                | ADC default            |
 | `GEMINI_MODEL`           | Model name                                  | `gemini-2.5-pro`       |
-| `FIRESTORE_COLLECTION`   | Firestore collection name                   | `repo_health_tasks`    |
+| `FIRESTORE_COLLECTION`   | Firestore collection name                   | `flow_agent_tasks`    |
 | `GITHUB_TOKEN`           | GitHub PAT — **enables real repo mode**      | — (mock PR fallback)   |
 | `GITHUB_WEBHOOK_SECRET`  | HMAC secret for webhook signature checks     | — (verification off)   |
-| `GITHUB_BRANCH_PREFIX`   | Prefix for generated fix branches            | `taskmaster/fix`       |
+| `GITHUB_BRANCH_PREFIX`   | Prefix for generated fix branches            | `flow/fix`       |
 | `PORT`                   | Server port (Cloud Run injects this)        | `8080`                 |
 
 ---
@@ -336,7 +336,7 @@ gcloud services enable secretmanager.googleapis.com
 printf "your-gemini-api-key" | gcloud secrets create gemini-api-key --data-file=-
 
 # 4. Build + deploy straight from source (Cloud Build uses the Dockerfile)
-gcloud run deploy repo-health-taskmaster \
+gcloud run deploy flow-agent \
   --source . \
   --region "$REGION" \
   --allow-unauthenticated \
@@ -352,9 +352,9 @@ service URL — point your GitHub/CI webhook at
 ### Alternative: build the image explicitly
 
 ```bash
-gcloud builds submit --tag "gcr.io/$PROJECT_ID/repo-health-taskmaster"
-gcloud run deploy repo-health-taskmaster \
-  --image "gcr.io/$PROJECT_ID/repo-health-taskmaster" \
+gcloud builds submit --tag "gcr.io/$PROJECT_ID/flow-agent"
+gcloud run deploy flow-agent \
+  --image "gcr.io/$PROJECT_ID/flow-agent" \
   --region "$REGION" --allow-unauthenticated \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID" \
   --update-secrets "GOOGLE_API_KEY=gemini-api-key:latest"

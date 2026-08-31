@@ -1,4 +1,4 @@
-r"""agent.py — Core intelligence for the Repo Health Taskmaster Agent.
+r"""agent.py — Core intelligence for the Flow Agent.
 
 This module wires together three concerns:
 
@@ -45,7 +45,7 @@ from github_client import (
     is_github_configured,
 )
 
-logger = logging.getLogger("taskmaster.agent")
+logger = logging.getLogger("flow.agent")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 # ---------------------------------------------------------------------------
@@ -55,21 +55,21 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # the free tier. Override with GEMINI_MODEL (e.g. gemini-3.1-pro-preview) if
 # your key has Pro quota.
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-FIRESTORE_COLLECTION: str = os.getenv("FIRESTORE_COLLECTION", "repo_health_tasks")
+FIRESTORE_COLLECTION: str = os.getenv("FIRESTORE_COLLECTION", "flow_agent_tasks")
 GOOGLE_CLOUD_PROJECT: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT")
-AGENT_APP_NAME: str = "repo_health_taskmaster"
+AGENT_APP_NAME: str = "flow_agent"
 
 # When a GITHUB_TOKEN is present the agent reads real repository files and
 # opens real pull requests. Without it, it degrades to the mock PR path so the
 # workflow stays fully demonstrable offline.
-GITHUB_BRANCH_PREFIX: str = os.getenv("GITHUB_BRANCH_PREFIX", "taskmaster/fix")
+GITHUB_BRANCH_PREFIX: str = os.getenv("GITHUB_BRANCH_PREFIX", "flow/fix")
 
 
 # ---------------------------------------------------------------------------
 # Task status enum — the single source of truth for the HITL workflow
 # ---------------------------------------------------------------------------
 class TaskStatus(str, Enum):
-    """Lifecycle states for a repo-health task."""
+    """Lifecycle states for a Flow Agent task."""
 
     RECEIVED = "RECEIVED"
     ANALYZING = "ANALYZING"
@@ -296,7 +296,7 @@ def build_unified_diff(file_path: str, original: str, patched: str) -> str:
 # ADK Agent definition
 # ---------------------------------------------------------------------------
 AGENT_INSTRUCTION = """\
-You are the "Repo Health Taskmaster", an autonomous software-maintenance agent.
+You are the "Flow Agent", an autonomous software-maintenance agent.
 
 Given a repository issue (title, body, and an optional error log / stack trace)
 and any provided source code, you must:
@@ -422,7 +422,7 @@ def _heuristic_patch(
     analysis = analyze_error_log(error_log, source_code)
     file_path = analysis["suspected_file"] or "src/app.py"
     original = source_code or "# TODO: original code unavailable"
-    patched = original + "\n# FIX applied by Repo Health Taskmaster (fallback)\n"
+    patched = original + "\n# FIX applied by Flow Agent (fallback)\n"
     return PatchProposal(
         summary=f"Proposed fix for: {issue_title}",
         root_cause=(

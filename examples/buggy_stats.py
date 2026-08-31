@@ -1,7 +1,7 @@
 """examples/buggy_stats.py — A deliberately broken module for demoing the agent.
 
-This file contains a real, reproducible bug. It exists so the Repo Health
-Taskmaster can be demonstrated end-to-end against a live repository: the agent
+This file contains a real, reproducible bug. It exists so the Flow Agent can
+be demonstrated end-to-end against a live repository: the agent
 reads THIS file from GitHub, diagnoses the fault, proposes a patch, waits for
 human approval, and then opens a real pull request fixing it.
 

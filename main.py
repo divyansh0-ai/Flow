@@ -1,4 +1,4 @@
-"""main.py — FastAPI backend for the Repo Health Taskmaster Agent.
+"""main.py — FastAPI backend for the Flow Agent.
 
 Exposes the Human-in-the-Loop (HITL) workflow over HTTP so it can run on
 Google Cloud Run:
@@ -27,16 +27,16 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-import agent as taskmaster
+import agent as flow
 
 # Shared secret configured on the GitHub webhook. When set, every inbound
 # payload must carry a valid X-Hub-Signature-256 header.
 GITHUB_WEBHOOK_SECRET: Optional[str] = os.getenv("GITHUB_WEBHOOK_SECRET")
 
-logger = logging.getLogger("taskmaster.api")
+logger = logging.getLogger("flow.api")
 
 app = FastAPI(
-    title="Repo Health Taskmaster Agent",
+    title="Flow Agent",
     description=(
         "Autonomous repo-maintenance agent (Google ADK + Gemini) with a "
         "Human-in-the-Loop approval gate backed by Firestore."
@@ -62,7 +62,7 @@ class AnalyzeResponse(BaseModel):
     task_id: str
     status: str
     approval_token: str
-    patch: Optional[taskmaster.PatchProposal] = None
+    patch: Optional[flow.PatchProposal] = None
     message: str
 
 
@@ -78,7 +78,7 @@ class TaskResponse(BaseModel):
     task_id: str
     status: str
     pr_url: str = ""
-    patch: Optional[taskmaster.PatchProposal] = None
+    patch: Optional[flow.PatchProposal] = None
     message: str
 
 
@@ -119,9 +119,9 @@ def healthz() -> dict:
     """Liveness probe for Cloud Run."""
     return {
         "status": "ok",
-        "model": taskmaster.GEMINI_MODEL,
-        "collection": taskmaster.FIRESTORE_COLLECTION,
-        "github_mode": "real" if taskmaster.is_github_configured() else "mock",
+        "model": flow.GEMINI_MODEL,
+        "collection": flow.FIRESTORE_COLLECTION,
+        "github_mode": "real" if flow.is_github_configured() else "mock",
         "webhook_signature_verification": bool(GITHUB_WEBHOOK_SECRET),
     }
 
@@ -130,7 +130,7 @@ def healthz() -> dict:
 def root() -> dict:
     """Human-friendly service banner."""
     return {
-        "service": "Repo Health Taskmaster Agent",
+        "service": "Flow Agent",
         "docs": "/docs",
         "endpoints": ["/webhook/analyze", "/workflow/approve", "/workflow/reject"],
     }
@@ -158,7 +158,7 @@ async def webhook_analyze(
     verify_github_signature(await request.body(), x_hub_signature_256)
 
     try:
-        record = taskmaster.ingest_and_analyze(
+        record = flow.ingest_and_analyze(
             repo=payload.repo,
             issue_title=payload.issue_title,
             issue_body=payload.issue_body,
@@ -191,7 +191,7 @@ async def webhook_analyze(
 def workflow_approve(payload: ApproveRequest) -> TaskResponse:
     """Approve a pending task; the agent then creates the (mock) pull request."""
     try:
-        record = taskmaster.approve_and_execute(payload.task_id, payload.approval_token)
+        record = flow.approve_and_execute(payload.task_id, payload.approval_token)
     except KeyError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -217,7 +217,7 @@ def workflow_approve(payload: ApproveRequest) -> TaskResponse:
 def workflow_reject(payload: ApproveRequest) -> TaskResponse:
     """Reject a pending task (negative HITL path); no PR is created."""
     try:
-        record = taskmaster.reject_task(
+        record = flow.reject_task(
             payload.task_id, payload.approval_token, payload.reason
         )
     except KeyError as exc:
@@ -244,7 +244,7 @@ def workflow_reject(payload: ApproveRequest) -> TaskResponse:
 @app.get("/tasks/{task_id}", tags=["workflow"])
 def get_task(task_id: str) -> JSONResponse:
     """Return the full task record, including the Firestore audit history."""
-    record = taskmaster.repository.get(task_id)
+    record = flow.repository.get(task_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Task not found.")
     # Never leak the approval token on read.
