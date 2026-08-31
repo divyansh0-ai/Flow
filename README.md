@@ -13,6 +13,29 @@
 >
 > Built for the **All Things Agentic Hackathon**.
 
+## 🚀 Live deployment
+
+**https://flow-agent-554246397954.us-central1.run.app**
+
+| | |
+| --- | --- |
+| Interactive API docs | [`/docs`](https://flow-agent-554246397954.us-central1.run.app/docs) |
+| Health + live backends | [`/health`](https://flow-agent-554246397954.us-central1.run.app/health) |
+| Platform | Google Cloud Run (`us-central1`) |
+| State | Cloud Firestore, collection `flow_agent_tasks` |
+| Model | Gemini via Google ADK |
+
+`/health` reports which backing services are genuinely live:
+
+```json
+{"status":"ok","model":"gemini-3.5-flash","state_backend":"firestore",
+ "collection":"flow_agent_tasks","github_mode":"mock"}
+```
+
+Persistence is real, not asserted: a task created before a redeploy survives
+the container being replaced, with its full audit history intact — something
+the in-memory fallback could not do.
+
 The agent ingests a repository error/issue, uses Gemini to **diagnose the root
 cause and generate a structured patch**, then **pauses for human approval**
 before taking any outward action. Nothing gets "pushed" until a human says yes.
