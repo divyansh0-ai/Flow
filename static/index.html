@@ -113,6 +113,7 @@
   .b-pending{background:#33280c;color:var(--warn)}
   .b-created{background:#0d2a1a;color:var(--ok)}
   .b-rejected,.b-failed{background:#2d1418;color:var(--err)}
+  .b-unver{background:#2a2418;color:var(--warn);opacity:.85}
 
   .meta{display:grid;grid-template-columns:110px 1fr;gap:9px 16px;font-size:13px;margin:16px 0}
   .meta dt{color:var(--muted);font-weight:500}
@@ -320,7 +321,7 @@ async function analyze(payload, label){
       <p><b>Reading the repository…</b><br>
       <span style="font-size:12.5px;color:var(--dim)">
       The agent locates the failing file, fetches it from GitHub, and drafts a fix.
-      This can take up to a minute.</span></p></div>`;
+      It clones the repo, proposes a fix, and runs the test suite to check it. This can take a couple of minutes.</span></p></div>`;
   try{
     const r = await fetch('/webhook/analyze',{method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -349,13 +350,25 @@ const badgeFor = s => ({PENDING_APPROVAL:'b-pending',PR_CREATED:'b-created',
 
 function showProposal(d){
   const p = d.patch || {};
+  const vBadge = p.verified
+    ? `<span class="badge b-created" title="${esc(p.test_summary)}">✓ tests passed</span>`
+    : `<span class="badge b-unver" title="No runnable test suite, or tests did not pass">unverified</span>`;
+  const attempts = p.attempts > 1
+    ? `<dt>Attempts</dt><dd>${p.attempts} (revised after test failure)</dd>` : '';
+  const tests = p.test_summary
+    ? `<dt>Test run</dt><dd class="mono" style="font-size:12px">${esc(p.test_summary)}</dd>` : '';
+
   $('out').innerHTML = `
-    <span class="badge ${badgeFor(d.status)}">${d.status.replace(/_/g,' ')}</span>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span class="badge ${badgeFor(d.status)}">${d.status.replace(/_/g,' ')}</span>
+      ${vBadge}
+    </div>
     <dl class="meta">
       <dt>Diagnosis</dt><dd>${esc(p.summary)}</dd>
       <dt>Root cause</dt><dd>${esc(p.root_cause)}</dd>
       <dt>File</dt><dd class="mono" style="font-size:12.5px">${esc(p.file_path)}</dd>
       <dt>Confidence</dt><dd>${p.confidence ?? '—'}</dd>
+      ${tests}${attempts}
     </dl>
     <pre class="diff">${renderDiff(p.unified_diff)}</pre>
     <div class="gate">

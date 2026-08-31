@@ -145,6 +145,7 @@ def healthz() -> dict:
     return {
         "status": "ok",
         "model": flow.GEMINI_MODEL,
+        "model_backend": flow.model_backend(),
         "state_backend": flow.repository.backend,
         "collection": flow.FIRESTORE_COLLECTION,
         "github_mode": "real" if flow.is_github_configured() else "mock",

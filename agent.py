@@ -64,6 +64,28 @@ AGENT_APP_NAME: str = "flow_agent"
 # workflow stays fully demonstrable offline.
 GITHUB_BRANCH_PREFIX: str = os.getenv("GITHUB_BRANCH_PREFIX", "flow/fix")
 
+# The agentic loop clones the repo and runs its tests to verify a patch before
+# a human ever sees it. Disable with FLOW_AGENTIC=0 to fall back to a single
+# unverified proposal (much faster, but the patch is never proven).
+AGENTIC_ENABLED: bool = os.getenv("FLOW_AGENTIC", "1") not in ("0", "false", "False")
+
+# Gemini can be reached either through an AI Studio API key (free tier, ~20
+# requests/day) or through Vertex AI on the project's own billing, which the
+# verification loop needs since each attempt costs several calls. The ADK reads
+# GOOGLE_GENAI_USE_VERTEXAI / GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION
+# directly; this is only so the backend in use is observable.
+USE_VERTEX: bool = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true")
+VERTEX_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+
+def model_backend() -> str:
+    """Report how Gemini is being reached, for the health endpoint."""
+    if USE_VERTEX:
+        return f"vertex-ai ({VERTEX_LOCATION})"
+    if os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"):
+        return "ai-studio (free tier)"
+    return "none"
+
 
 # ---------------------------------------------------------------------------
 # Task status enum — the single source of truth for the HITL workflow
@@ -94,6 +116,16 @@ class PatchProposal(BaseModel):
     unified_diff: str = Field(default="", description="Unified diff of the change.")
     confidence: float = Field(
         default=0.5, ge=0.0, le=1.0, description="Agent confidence 0..1."
+    )
+    verified: bool = Field(
+        default=False,
+        description="True only when the repository's own tests passed with this patch.",
+    )
+    test_summary: str = Field(
+        default="", description="Result line from the verification test run."
+    )
+    attempts: int = Field(
+        default=0, description="Propose-verify cycles the agent needed."
     )
 
 
@@ -527,6 +559,70 @@ def fetch_source_from_github(repo: str, error_log: str) -> Tuple[str, str]:
         return "", ""
 
 
+def run_verified_analysis(
+    task_id: str,
+    repo: str,
+    issue_title: str,
+    issue_body: str,
+    error_log: str = "",
+    source_code: str = "",
+) -> PatchProposal:
+    """Produce a patch, verified against the repository's tests where possible.
+
+    Runs the full agentic loop — clone, explore, propose, run the test suite,
+    revise on failure. Falls back to single-shot analysis when the loop cannot
+    run (repository not clonable, loop disabled, or no usable result), so the
+    service degrades rather than failing outright.
+
+    Each attempt is written to the task's audit trail as it happens.
+    """
+    if AGENTIC_ENABLED:
+        try:
+            from agentic import run_agentic_fix
+
+            result = run_agentic_fix(
+                repo=repo,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                error_log=error_log,
+                token=os.getenv("GITHUB_TOKEN"),
+            )
+
+            for it in result.iterations:
+                repository.update(
+                    task_id,
+                    note=(
+                        f"Attempt {it.attempt}: patched {it.file_path or '?'} — "
+                        f"tests {'passed' if it.tests_passed else 'skipped' if it.tests_skipped else 'failed'}"
+                        f"{' (' + it.test_summary + ')' if it.test_summary else ''}"
+                    ),
+                )
+
+            if result.success and result.unified_diff:
+                return PatchProposal(
+                    summary=result.summary or f"Fix for: {issue_title}",
+                    root_cause=result.root_cause,
+                    file_path=result.file_path,
+                    original_snippet=result.original_snippet,
+                    patched_snippet=result.patched_snippet,
+                    unified_diff=result.unified_diff,
+                    confidence=result.confidence,
+                    verified=result.verified,
+                    test_summary=result.test_summary,
+                    attempts=len(result.iterations),
+                )
+
+            logger.info(
+                "Agentic loop produced no patch (%s); falling back.",
+                result.error or "no result",
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back rather than fail
+            logger.warning("Agentic loop unavailable (%s); falling back.", exc)
+            repository.update(task_id, note=f"Verification loop unavailable: {exc}")
+
+    return generate_patch(repo, issue_title, issue_body, error_log, source_code)
+
+
 def ingest_and_analyze(
     repo: str,
     issue_title: str,
@@ -567,7 +663,9 @@ def ingest_and_analyze(
             )
 
     try:
-        patch = generate_patch(repo, issue_title, issue_body, error_log, source_code)
+        patch = run_verified_analysis(
+            task_id, repo, issue_title, issue_body, error_log, source_code
+        )
     except Exception as exc:  # noqa: BLE001
         repository.update(
             task_id, status=TaskStatus.FAILED, note=f"Analysis failed: {exc}"
