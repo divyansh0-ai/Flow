@@ -51,7 +51,10 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 # ---------------------------------------------------------------------------
 # Configuration (all overridable via environment for Cloud Run)
 # ---------------------------------------------------------------------------
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+# gemini-2.5-pro is retired for new API keys; 3.5-flash is broadly available on
+# the free tier. Override with GEMINI_MODEL (e.g. gemini-3.1-pro-preview) if
+# your key has Pro quota.
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 FIRESTORE_COLLECTION: str = os.getenv("FIRESTORE_COLLECTION", "repo_health_tasks")
 GOOGLE_CLOUD_PROJECT: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT")
 AGENT_APP_NAME: str = "repo_health_taskmaster"
