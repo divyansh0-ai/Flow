@@ -23,6 +23,8 @@ def calculate_average(scores: List[float]) -> float:
     BUG: divides by ``len(scores)`` without guarding against an empty list,
     raising ZeroDivisionError instead of handling the empty case.
     """
+    if not scores:
+      return 0.0
     return sum(scores) / len(scores)
 
 
