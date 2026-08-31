@@ -18,11 +18,12 @@ Run locally:
 from __future__ import annotations
 
 import hashlib
+import re
 import hmac
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -50,13 +51,32 @@ app = FastAPI(
 # Request / response models
 # ---------------------------------------------------------------------------
 class AnalyzeRequest(BaseModel):
-    """Payload for POST /webhook/analyze."""
+    """Payload for POST /webhook/analyze.
+
+    Either supply the issue details directly (the CI/webhook path), or give an
+    ``issue_number`` and let the agent fetch the issue from GitHub itself.
+    """
 
     repo: str = Field(..., examples=["octocat/hello-world"], description="owner/name")
-    issue_title: str = Field(..., description="Short title of the reported issue.")
+    issue_number: Optional[int] = Field(
+        default=None,
+        description="Fetch this issue from GitHub instead of passing its text.",
+    )
+    issue_title: str = Field(default="", description="Short title of the reported issue.")
     issue_body: str = Field(default="", description="Full issue description.")
     error_log: str = Field(default="", description="Traceback or CI failure output.")
     source_code: str = Field(default="", description="Relevant source file contents.")
+
+
+class IssueSummary(BaseModel):
+    """One open issue, as offered to the operator console."""
+
+    number: int
+    title: str
+    body: str = ""
+    url: str = ""
+    labels: List[str] = Field(default_factory=list)
+    comments: int = 0
 
 
 class AnalyzeResponse(BaseModel):
@@ -153,6 +173,47 @@ def root_banner() -> dict:
     }
 
 
+def _extract_traceback(text: str) -> str:
+    """Pull a Python traceback out of an issue body, if one is present.
+
+    Real bug reports paste the stack trace into the description, usually inside
+    a fenced code block. Recovering it gives the agent the same signal a CI
+    webhook would have supplied directly.
+    """
+    if not text:
+        return ""
+
+    # Prefer a fenced block that contains a traceback.
+    for block in re.findall(r"```[a-zA-Z]*\n(.*?)```", text, re.DOTALL):
+        if "Traceback" in block or re.search(r"^\w*(Error|Exception):", block, re.M):
+            return block.strip()
+
+    # Otherwise take from the first "Traceback" line to the end of that block.
+    match = re.search(r"(Traceback \(most recent call last\):.*?)(?:\n\n|\Z)",
+                      text, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+@app.get("/api/issues", response_model=List[IssueSummary], tags=["workflow"])
+def list_issues(repo: str, limit: int = 15) -> List[IssueSummary]:
+    """List a repository's open issues so one can be picked for repair.
+
+    Works without a GitHub token for public repositories, at GitHub's lower
+    anonymous rate limit.
+    """
+    from github_client import GitHubClient, GitHubError
+
+    if "/" not in repo:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail="Repository must be 'owner/name'."
+        )
+    try:
+        client = GitHubClient(allow_anonymous=True)
+        return [IssueSummary(**i) for i in client.list_open_issues(repo, limit=limit)]
+    except GitHubError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Step 1 + 2 + 3: ingest, analyze, park at PENDING_APPROVAL
 # ---------------------------------------------------------------------------
@@ -174,12 +235,37 @@ async def webhook_analyze(
     """
     verify_github_signature(await request.body(), x_hub_signature_256)
 
+    title, body = payload.issue_title, payload.issue_body
+
+    # When only an issue number is given, the agent retrieves the issue itself
+    # rather than making the caller paste its contents.
+    if payload.issue_number is not None:
+        from github_client import GitHubClient, GitHubError
+
+        try:
+            issue = GitHubClient(allow_anonymous=True).get_issue(
+                payload.repo, payload.issue_number
+            )
+        except GitHubError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail=f"Could not fetch issue #{payload.issue_number}: {exc}",
+            ) from exc
+        title = title or issue["title"]
+        body = body or issue["body"]
+
+    if not title.strip():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail="Provide either issue_number or issue_title.",
+        )
+
     try:
         record = flow.ingest_and_analyze(
             repo=payload.repo,
-            issue_title=payload.issue_title,
-            issue_body=payload.issue_body,
-            error_log=payload.error_log,
+            issue_title=title,
+            issue_body=body,
+            error_log=payload.error_log or _extract_traceback(body),
             source_code=payload.source_code,
         )
     except Exception as exc:  # noqa: BLE001

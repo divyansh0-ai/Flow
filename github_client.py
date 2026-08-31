@@ -44,26 +44,39 @@ class GitHubClient:
         token: Optional[str] = None,
         api_base: str = GITHUB_API_BASE,
         timeout: int = REQUEST_TIMEOUT,
+        allow_anonymous: bool = False,
     ) -> None:
+        """Create a client.
+
+        Args:
+            token: GitHub token. Required for writes and private repositories.
+            api_base: API root, overridable for GitHub Enterprise.
+            timeout: Per-request timeout in seconds.
+            allow_anonymous: Permit construction without a token. Public
+                read-only calls (listing issues, reading files of a public
+                repo) work unauthenticated, subject to a lower rate limit.
+                Any write will still fail, which is the intended behaviour.
+        """
         self.token = token or GITHUB_TOKEN
         self.api_base = api_base.rstrip("/")
         self.timeout = timeout
 
-        if not self.token:
+        if not self.token and not allow_anonymous:
             raise GitHubError(
                 "No GitHub token configured. Set the GITHUB_TOKEN environment "
                 "variable to enable real repository operations."
             )
 
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "flow-agent",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
         self._session = requests.Session()
-        self._session.headers.update(
-            {
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "flow-agent",
-            }
-        )
+        self._session.headers.update(headers)
 
     # -- low-level -----------------------------------------------------------
     def _request(
@@ -128,6 +141,49 @@ class GitHubClient:
         if not sha:
             raise GitHubError(f"Could not resolve branch '{branch}' in '{repo}'.")
         return str(sha)
+
+    # -- issues ---------------------------------------------------------------
+    def list_open_issues(self, repo: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """List open issues for a repository, newest first.
+
+        Pull requests are filtered out — GitHub returns them from the issues
+        endpoint, but they are not bug reports to act on.
+        """
+        data = self._request(
+            "GET",
+            f"/repos/{repo}/issues",
+            params={"state": "open", "per_page": min(limit, 100), "sort": "created"},
+        ) or []
+
+        issues: List[Dict[str, Any]] = []
+        for item in data:
+            if "pull_request" in item:
+                continue
+            issues.append(
+                {
+                    "number": item.get("number"),
+                    "title": item.get("title", ""),
+                    "body": item.get("body") or "",
+                    "url": item.get("html_url", ""),
+                    "labels": [l.get("name", "") for l in item.get("labels", [])],
+                    "created_at": item.get("created_at", ""),
+                    "comments": item.get("comments", 0),
+                }
+            )
+        return issues[:limit]
+
+    def get_issue(self, repo: str, number: int) -> Dict[str, Any]:
+        """Fetch a single issue's title, body, and metadata."""
+        item = self._request("GET", f"/repos/{repo}/issues/{number}")
+        if not item:
+            raise GitHubError(f"Issue #{number} not found in '{repo}'.")
+        return {
+            "number": item.get("number"),
+            "title": item.get("title", ""),
+            "body": item.get("body") or "",
+            "url": item.get("html_url", ""),
+            "labels": [l.get("name", "") for l in item.get("labels", [])],
+        }
 
     # -- file contents --------------------------------------------------------
     def get_file(
