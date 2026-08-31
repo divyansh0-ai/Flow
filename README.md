@@ -94,6 +94,7 @@ RECEIVED → ANALYZING → PENDING_APPROVAL → APPROVED → PR_CREATED
 flow/
 ├── agent.py            # ADK agent, tools, Firestore repository, orchestration
 ├── main.py              # FastAPI app (webhook + approval endpoints)
+├── github_client.py      # Real GitHub REST API client (read files, branch, commit, PR)
 ├── approve_cli.py        # Interactive terminal HITL approval console
 ├── requirements.txt      # Python dependencies
 ├── Dockerfile            # Cloud Run container (non-root, $PORT-aware)
@@ -106,6 +107,7 @@ flow/
 | ------------------- | ------------------------------------------------------------------------ |
 | `agent.py`           | ADK agent, tools, Firestore repository, workflow orchestration          |
 | `main.py`            | FastAPI app: `/webhook/analyze`, `/workflow/approve`, `/workflow/reject`  |
+| `github_client.py`    | Real GitHub API: fetch files, create branch, commit patch, open PR      |
 | `approve_cli.py`      | Interactive terminal HITL approval console                              |
 | `requirements.txt`    | Python dependencies                                                     |
 | `Dockerfile`          | Cloud Run container (non-root, `$PORT`-aware)                            |
@@ -126,6 +128,9 @@ flow/
 | `GOOGLE_CLOUD_PROJECT`   | GCP project id for Firestore                | ADC default            |
 | `GEMINI_MODEL`           | Model name                                  | `gemini-2.5-pro`       |
 | `FIRESTORE_COLLECTION`   | Firestore collection name                   | `repo_health_tasks`    |
+| `GITHUB_TOKEN`           | GitHub PAT — **enables real repo mode**      | — (mock PR fallback)   |
+| `GITHUB_WEBHOOK_SECRET`  | HMAC secret for webhook signature checks     | — (verification off)   |
+| `GITHUB_BRANCH_PREFIX`   | Prefix for generated fix branches            | `taskmaster/fix`       |
 | `PORT`                   | Server port (Cloud Run injects this)        | `8080`                 |
 
 ---
@@ -228,6 +233,70 @@ token is redacted on read).
 
 ---
 
+## 4b. Real repository mode
+
+By default the agent runs in **mock mode**: it analyzes whatever `source_code`
+you pass in the webhook and synthesizes a fake PR URL. Setting a
+**`GITHUB_TOKEN`** switches it to **real mode**, where it:
+
+1. **Reads real code** — localizes the failing file from the traceback,
+   resolves it against the repo tree, and fetches the actual file contents via
+   the GitHub Contents API (so you can omit `source_code` entirely).
+2. **Opens a real pull request** — after human approval, it creates a fix
+   branch, commits the patched file, and opens a genuine PR with the diff,
+   root-cause analysis, and agent confidence in the body.
+
+### Setup
+
+Create a token at **https://github.com/settings/tokens**:
+
+- *Classic:* `repo` scope.
+- *Fine-grained:* Repository permissions → **Contents: Read and write** and
+  **Pull requests: Read and write**.
+
+```bash
+export GITHUB_TOKEN="ghp_your_token_here"      # PowerShell: $env:GITHUB_TOKEN="ghp_..."
+python -m uvicorn main:app --port 8080
+```
+
+Confirm the mode is active:
+
+```bash
+curl -s http://localhost:8080/healthz
+# {"status":"ok", ..., "github_mode":"real", ...}
+```
+
+Now analyze a real bug **without** passing any source code — the agent fetches
+it from the repo itself:
+
+```bash
+curl -s -X POST http://localhost:8080/webhook/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+        "repo": "your-user/your-repo",
+        "issue_title": "ZeroDivisionError in calculate_average()",
+        "issue_body": "Crashes on an empty scores list.",
+        "error_log": "Traceback (most recent call last):\n  File \"src/stats.py\", line 7, in calculate_average\n    return sum(scores) / len(scores)\nZeroDivisionError: division by zero"
+      }'
+```
+
+Approve it, and a real PR appears on the repository.
+
+> ⚠️ **This writes to a live repository.** The human approval gate is the only
+> thing standing between the model's proposal and a real branch + PR. Point it
+> at a test repo first. Nothing is written during analysis — reads only.
+
+### Securing the webhook
+
+Set a shared secret and the service will reject payloads whose
+`X-Hub-Signature-256` HMAC doesn't match (matching GitHub's webhook scheme):
+
+```bash
+export GITHUB_WEBHOOK_SECRET="your-random-secret"
+```
+
+---
+
 ## 5. API reference
 
 | Method | Path                | Description                                                         |
@@ -303,7 +372,9 @@ gcloud run deploy repo-health-taskmaster \
 | Ingest via webhook                        | `POST /webhook/analyze`                                          |
 | Analyze + generate structured patch       | `generate_patch()` → `PatchProposal`                              |
 | HITL gatekeeper (PENDING_APPROVAL)        | `ingest_and_analyze()` + single-use `approval_token`               |
-| Approve → execute → PR_CREATED            | `POST /workflow/approve` → `approve_and_execute()` (mock PR)       |
+| Approve → execute → PR_CREATED            | `POST /workflow/approve` → `approve_and_execute()`                 |
+| Real GitHub PR creation (beyond the mock) | `github_client.py` → `create_real_github_pr()`                     |
+| Webhook authenticity                      | `main.py` → `verify_github_signature()` (HMAC-SHA256)              |
 
 ---
 

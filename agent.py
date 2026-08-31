@@ -32,9 +32,18 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
+
+import github_client
+from github_client import (
+    GitHubClient,
+    GitHubError,
+    apply_snippet_patch,
+    build_pr_body,
+    is_github_configured,
+)
 
 logger = logging.getLogger("taskmaster.agent")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -46,6 +55,11 @@ GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 FIRESTORE_COLLECTION: str = os.getenv("FIRESTORE_COLLECTION", "repo_health_tasks")
 GOOGLE_CLOUD_PROJECT: Optional[str] = os.getenv("GOOGLE_CLOUD_PROJECT")
 AGENT_APP_NAME: str = "repo_health_taskmaster"
+
+# When a GITHUB_TOKEN is present the agent reads real repository files and
+# opens real pull requests. Without it, it degrades to the mock PR path so the
+# workflow stays fully demonstrable offline.
+GITHUB_BRANCH_PREFIX: str = os.getenv("GITHUB_BRANCH_PREFIX", "taskmaster/fix")
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +106,9 @@ class TaskRecord(BaseModel):
     approval_token: str = ""
     patch: Optional[PatchProposal] = None
     pr_url: str = ""
+    # Real-repo context resolved at analysis time (empty in offline/mock mode).
+    resolved_path: str = ""
+    source_fetched_from_github: bool = False
     history: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -461,6 +478,47 @@ def generate_patch(
 # ---------------------------------------------------------------------------
 # High-level workflow steps (used by the FastAPI layer)
 # ---------------------------------------------------------------------------
+def fetch_source_from_github(repo: str, error_log: str) -> Tuple[str, str]:
+    """Pull the suspected file's real contents from the live repository.
+
+    Localizes the failing file from the traceback, resolves it against the
+    repo tree (tracebacks often carry absolute or partial paths), and returns
+    its contents so the agent reasons about actual code rather than a snippet
+    pasted into the webhook.
+
+    Returns:
+        ``(source_code, resolved_path)`` — both empty when nothing was found.
+    """
+    if not is_github_configured():
+        return "", ""
+
+    suspected = analyze_error_log(error_log, "").get("suspected_file", "")
+    if not suspected:
+        return "", ""
+
+    try:
+        client = GitHubClient()
+        fetched = client.get_file(repo, suspected)
+        resolved = suspected
+
+        if fetched is None:
+            discovered = client.search_file_by_name(repo, suspected)
+            if not discovered:
+                logger.info("Could not locate '%s' in '%s'.", suspected, repo)
+                return "", ""
+            resolved = discovered
+            fetched = client.get_file(repo, resolved)
+
+        if fetched is None:
+            return "", ""
+
+        logger.info("Fetched real source '%s' from '%s'.", resolved, repo)
+        return fetched[0], resolved
+    except GitHubError as exc:
+        logger.warning("Could not fetch source from GitHub: %s", exc)
+        return "", ""
+
+
 def ingest_and_analyze(
     repo: str,
     issue_title: str,
@@ -488,6 +546,18 @@ def ingest_and_analyze(
     repository.create(record)
     repository.update(task_id, status=TaskStatus.ANALYZING, note="Running agent analysis.")
 
+    # Prefer real repository contents over whatever the webhook supplied.
+    resolved_path = ""
+    from_github = False
+    if not source_code.strip():
+        source_code, resolved_path = fetch_source_from_github(repo, error_log)
+        from_github = bool(source_code)
+        if from_github:
+            repository.update(
+                task_id,
+                note=f"Fetched real source '{resolved_path}' from GitHub.",
+            )
+
     try:
         patch = generate_patch(repo, issue_title, issue_body, error_log, source_code)
     except Exception as exc:  # noqa: BLE001
@@ -501,18 +571,19 @@ def ingest_and_analyze(
         status=TaskStatus.PENDING_APPROVAL,
         note="Patch generated; awaiting human approval.",
         patch=patch,
+        resolved_path=resolved_path,
+        source_fetched_from_github=from_github,
     )
 
 
 def mock_create_github_pr(record: TaskRecord) -> str:
-    """Mock the final outward action: opening a GitHub pull request.
+    """Synthesize a plausible PR URL when GitHub credentials are absent.
 
-    In production this would call the GitHub REST API. Here we synthesize a
-    deterministic, plausible PR URL so the workflow is fully demonstrable
-    without external credentials or side effects.
+    Used as the offline/demo fallback so the workflow remains fully
+    demonstrable without external credentials or side effects.
     """
     pr_number = int(record.task_id[:6], 16) % 9000 + 1000
-    branch = f"taskmaster/fix-{record.task_id[:8]}"
+    branch = f"{GITHUB_BRANCH_PREFIX}-{record.task_id[:8]}"
     logger.info(
         "Mock PR: repo=%s branch=%s file=%s",
         record.repo,
@@ -520,6 +591,98 @@ def mock_create_github_pr(record: TaskRecord) -> str:
         record.patch.file_path if record.patch else "?",
     )
     return f"https://github.com/{record.repo}/pull/{pr_number}"
+
+
+def create_real_github_pr(record: TaskRecord) -> str:
+    """Open a genuine pull request carrying the approved patch.
+
+    Performs the full write sequence against the live repository:
+    resolve default branch -> create fix branch -> commit patched file ->
+    open pull request.
+
+    Called **only** from :func:`approve_and_execute`, after the human gate.
+
+    Raises:
+        GitHubError: if any GitHub API step fails.
+        ValueError: if the patch cannot be applied to the fetched file.
+    """
+    if record.patch is None:
+        raise ValueError("Task has no patch to submit.")
+
+    patch = record.patch
+    client = GitHubClient()
+    repo = record.repo
+
+    # 1. Resolve the target file path on the real repository.
+    path = record.resolved_path or patch.file_path
+    fetched = client.get_file(repo, path)
+    if fetched is None:
+        # The traceback path may not match the repo layout; search by basename.
+        discovered = client.search_file_by_name(repo, path)
+        if discovered:
+            path = discovered
+            fetched = client.get_file(repo, path)
+    if fetched is None:
+        raise GitHubError(
+            f"File '{path}' not found in '{repo}'; cannot apply the patch."
+        )
+
+    current_content, blob_sha = fetched
+
+    # 2. Splice the approved patch into the real file content.
+    new_content = apply_snippet_patch(
+        current_content, patch.original_snippet, patch.patched_snippet
+    )
+    if new_content == current_content:
+        raise ValueError("Patch produced no change against the current file.")
+
+    # 3. Branch off the default branch.
+    base_branch = client.get_default_branch(repo)
+    base_sha = client.get_branch_sha(repo, base_branch)
+    fix_branch = f"{GITHUB_BRANCH_PREFIX}-{record.task_id[:8]}"
+    client.create_branch(repo, fix_branch, base_sha)
+
+    # 4. Commit the patched file onto the fix branch.
+    #    Re-read the blob SHA on the new branch to avoid a stale-SHA conflict.
+    on_branch = client.get_file(repo, path, ref=fix_branch)
+    branch_sha = on_branch[1] if on_branch else blob_sha
+    client.commit_file(
+        repo=repo,
+        path=path,
+        content=new_content,
+        message=f"fix: {patch.summary}",
+        branch=fix_branch,
+        sha=branch_sha,
+    )
+
+    # 5. Open the pull request.
+    return client.create_pull_request(
+        repo=repo,
+        title=f"fix: {patch.summary}",
+        body=build_pr_body(
+            task_id=record.task_id,
+            summary=patch.summary,
+            root_cause=patch.root_cause,
+            confidence=patch.confidence,
+            unified_diff=patch.unified_diff,
+        ),
+        head=fix_branch,
+        base=base_branch,
+    )
+
+
+def create_github_pr(record: TaskRecord) -> Tuple[str, bool]:
+    """Create a pull request, using the real GitHub API when configured.
+
+    Returns:
+        ``(pr_url, is_real)`` — ``is_real`` is ``False`` when the mock path was
+        used because no ``GITHUB_TOKEN`` is present.
+    """
+    if not is_github_configured():
+        logger.info("No GITHUB_TOKEN set; using mock pull-request path.")
+        return mock_create_github_pr(record), False
+
+    return create_real_github_pr(record), True
 
 
 def approve_and_execute(task_id: str, approval_token: str) -> TaskRecord:
@@ -545,17 +708,18 @@ def approve_and_execute(task_id: str, approval_token: str) -> TaskRecord:
     repository.update(task_id, status=TaskStatus.APPROVED, note="Human approved patch.")
 
     try:
-        pr_url = mock_create_github_pr(record)
+        pr_url, is_real = create_github_pr(record)
     except Exception as exc:  # noqa: BLE001
         repository.update(
             task_id, status=TaskStatus.FAILED, note=f"PR creation failed: {exc}"
         )
         raise
 
+    kind = "real" if is_real else "mock"
     return repository.update(
         task_id,
         status=TaskStatus.PR_CREATED,
-        note=f"Pull request created: {pr_url}",
+        note=f"Pull request created ({kind}): {pr_url}",
         pr_url=pr_url,
     )
 

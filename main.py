@@ -17,15 +17,21 @@ Run locally:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import agent as taskmaster
+
+# Shared secret configured on the GitHub webhook. When set, every inbound
+# payload must carry a valid X-Hub-Signature-256 header.
+GITHUB_WEBHOOK_SECRET: Optional[str] = os.getenv("GITHUB_WEBHOOK_SECRET")
 
 logger = logging.getLogger("taskmaster.api")
 
@@ -77,6 +83,35 @@ class TaskResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Webhook authenticity
+# ---------------------------------------------------------------------------
+def verify_github_signature(body: bytes, signature: Optional[str]) -> None:
+    """Validate GitHub's HMAC-SHA256 webhook signature.
+
+    No-op when ``GITHUB_WEBHOOK_SECRET`` is unset (local development).
+
+    Raises:
+        HTTPException: 401 when the signature is missing or does not match.
+    """
+    if not GITHUB_WEBHOOK_SECRET:
+        return
+
+    if not signature:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="Missing X-Hub-Signature-256 header."
+        )
+
+    expected = "sha256=" + hmac.new(
+        GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Health / metadata
 # ---------------------------------------------------------------------------
 @app.get("/healthz", tags=["ops"])
@@ -86,6 +121,8 @@ def healthz() -> dict:
         "status": "ok",
         "model": taskmaster.GEMINI_MODEL,
         "collection": taskmaster.FIRESTORE_COLLECTION,
+        "github_mode": "real" if taskmaster.is_github_configured() else "mock",
+        "webhook_signature_verification": bool(GITHUB_WEBHOOK_SECRET),
     }
 
 
@@ -108,12 +145,18 @@ def root() -> dict:
     status_code=status.HTTP_201_CREATED,
     tags=["workflow"],
 )
-def webhook_analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
+async def webhook_analyze(
+    payload: AnalyzeRequest,
+    request: Request,
+    x_hub_signature_256: Optional[str] = Header(default=None),
+) -> AnalyzeResponse:
     """Ingest a repo issue, run the agent, and gate the fix behind approval.
 
     Returns the generated patch plus a single-use ``approval_token`` that a
     human must present to ``/workflow/approve`` before any PR is created.
     """
+    verify_github_signature(await request.body(), x_hub_signature_256)
+
     try:
         record = taskmaster.ingest_and_analyze(
             repo=payload.repo,
