@@ -141,6 +141,10 @@ class TaskRecord(BaseModel):
     approval_token: str = ""
     patch: Optional[PatchProposal] = None
     pr_url: str = ""
+    # True when pr_url is a simulated placeholder rather than a real pull
+    # request, which happens when no GITHUB_TOKEN is configured. Callers must
+    # not present a simulated URL as a genuine link.
+    pr_is_mock: bool = False
     # Real-repo context resolved at analysis time (empty in offline/mock mode).
     resolved_path: str = ""
     source_fetched_from_github: bool = False
@@ -683,20 +687,22 @@ def ingest_and_analyze(
 
 
 def mock_create_github_pr(record: TaskRecord) -> str:
-    """Synthesize a plausible PR URL when GitHub credentials are absent.
+    """Describe the pull request that *would* be opened, without opening one.
 
-    Used as the offline/demo fallback so the workflow remains fully
-    demonstrable without external credentials or side effects.
+    Used when no ``GITHUB_TOKEN`` is configured, so the workflow stays
+    demonstrable offline. Deliberately does **not** return a github.com URL:
+    a fabricated link is indistinguishable from a real one and dead-ends at a
+    404, which misrepresents what the agent actually did. The returned string
+    names the branch and target instead, and callers mark it ``pr_is_mock``.
     """
-    pr_number = int(record.task_id[:6], 16) % 9000 + 1000
     branch = f"{GITHUB_BRANCH_PREFIX}-{record.task_id[:8]}"
     logger.info(
-        "Mock PR: repo=%s branch=%s file=%s",
+        "Simulated PR: repo=%s branch=%s file=%s",
         record.repo,
         branch,
         record.patch.file_path if record.patch else "?",
     )
-    return f"https://github.com/{record.repo}/pull/{pr_number}"
+    return f"(simulated) {record.repo} — would open PR from {branch}"
 
 
 def create_real_github_pr(record: TaskRecord) -> str:
@@ -821,12 +827,13 @@ def approve_and_execute(task_id: str, approval_token: str) -> TaskRecord:
         )
         raise
 
-    kind = "real" if is_real else "mock"
+    kind = "real" if is_real else "simulated"
     return repository.update(
         task_id,
         status=TaskStatus.PR_CREATED,
         note=f"Pull request created ({kind}): {pr_url}",
         pr_url=pr_url,
+        pr_is_mock=not is_real,
     )
 
 

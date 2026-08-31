@@ -400,8 +400,15 @@ async function decide(action){
     g.className = 'gate '+(good?'good':'bad');
     g.innerHTML = `
       <h3>${good?'✓ Approved — pull request created':'✕ Rejected — nothing was written'}</h3>
-      ${d.pr_url?`<p style="margin-bottom:8px">
-        <a href="${esc(d.pr_url)}" target="_blank" rel="noopener">${esc(d.pr_url)}</a></p>`:''}
+      ${!d.pr_url ? '' : d.pr_is_mock
+        ? `<p style="margin-bottom:8px;font-size:12.5px">
+             <span class="badge b-unver">simulated</span><br>
+             <span class="mono" style="font-size:12px;color:var(--muted)">${esc(d.pr_url)}</span><br>
+             <span style="color:var(--dim)">No GitHub token is configured, so no pull request
+             was actually opened. Set <span class="mono">GITHUB_TOKEN</span> to have the agent
+             open real pull requests.</span></p>`
+        : `<p style="margin-bottom:8px">
+             <a href="${esc(d.pr_url)}" target="_blank" rel="noopener">${esc(d.pr_url)}</a></p>`}
       <p style="margin:10px 0 0;font-size:11.5px">Audit trail, persisted in Firestore:</p>
       <ul class="tl">${hist.map(h=>`<li><span class="s">${esc(h.status)}</span>
         <span class="n">${esc(h.note)}</span></li>`).join('')}</ul>`;

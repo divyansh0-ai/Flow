@@ -79,6 +79,22 @@ class TestStateMachine:
         assert "PR_CREATED" in statuses
 
 
+class TestSimulatedPullRequests:
+    """Without a GitHub token the agent must not pretend it opened a PR."""
+
+    def test_simulated_pr_is_flagged(self, stub_patch: None) -> None:
+        record = flow.ingest_and_analyze("o/r", "bug", "body", "trace")
+        done = flow.approve_and_execute(record.task_id, record.approval_token)
+        assert done.pr_is_mock is True
+
+    def test_simulated_pr_is_not_a_github_url(self, stub_patch: None) -> None:
+        """A fabricated github.com link is indistinguishable from a real one."""
+        record = flow.ingest_and_analyze("o/r", "bug", "body", "trace")
+        done = flow.approve_and_execute(record.task_id, record.approval_token)
+        assert "github.com" not in done.pr_url
+        assert "simulated" in done.pr_url.lower()
+
+
 class TestApprovalSecurity:
     def test_wrong_token_is_rejected(self, stub_patch: None) -> None:
         record = flow.ingest_and_analyze("o/r", "bug", "body", "trace")

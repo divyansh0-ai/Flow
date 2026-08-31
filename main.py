@@ -99,6 +99,7 @@ class TaskResponse(BaseModel):
     task_id: str
     status: str
     pr_url: str = ""
+    pr_is_mock: bool = False
     patch: Optional[flow.PatchProposal] = None
     message: str
 
@@ -312,8 +313,14 @@ def workflow_approve(payload: ApproveRequest) -> TaskResponse:
         task_id=record.task_id,
         status=record.status.value,
         pr_url=record.pr_url,
+        pr_is_mock=record.pr_is_mock,
         patch=record.patch,
-        message=f"Approved and executed. Pull request created: {record.pr_url}",
+        message=(
+            f"Approved. Pull request created: {record.pr_url}"
+            if not record.pr_is_mock
+            else "Approved. No GITHUB_TOKEN is configured, so the pull request "
+                 "was simulated rather than opened."
+        ),
     )
 
 
