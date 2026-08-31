@@ -43,6 +43,14 @@ AGENTIC_APP_NAME: str = "flow_agent_loop"
 
 # Gemini's free tier rate-limits aggressively; transient 429/503 responses are
 # retried rather than being allowed to burn an iteration.
+# Source files the agent is allowed to see when gathering context. Kept
+# language-agnostic so the agent works on repositories that are not Python.
+SOURCE_EXTENSIONS: List[str] = [
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+    ".go", ".rs", ".java", ".rb", ".php", ".cs", ".kt", ".swift",
+    ".json", ".toml", ".cfg", ".ini", ".yaml", ".yml",
+]
+
 MODEL_RETRIES: int = int(os.getenv("FLOW_MODEL_RETRIES", "3"))
 RETRY_BASE_DELAY: float = float(os.getenv("FLOW_RETRY_BASE_DELAY", "10"))
 MAX_RETRY_SLEEP: float = float(os.getenv("FLOW_MAX_RETRY_SLEEP", "65"))
@@ -101,9 +109,7 @@ def list_repo_files() -> Dict[str, Any]:
     if _active_workspace is None:
         return {"error": "No repository workspace is active.", "files": []}
     try:
-        files = _active_workspace.list_files(
-            extensions=[".py", ".toml", ".cfg", ".ini", ".txt"]
-        )
+        files = _active_workspace.list_files(extensions=SOURCE_EXTENSIONS)
         return {"files": files, "count": len(files)}
     except WorkspaceError as exc:
         return {"error": str(exc), "files": []}

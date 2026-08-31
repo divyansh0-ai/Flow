@@ -177,6 +177,45 @@ class RepoWorkspace:
         logger.info("Wrote candidate patch to '%s'.", rel_path)
 
     # -- verification ---------------------------------------------------------
+    def _test_command(self, target: Optional[str] = None) -> Optional[List[str]]:
+        """Choose a test command by inspecting the repository's layout.
+
+        Returns ``None`` when no runner can be identified, so the caller can
+        report an honest "unverified" result rather than a false failure.
+        """
+        root = self._require_root()
+
+        # Python: pytest, if the project looks like Python at all.
+        looks_python = (
+            (root / "pyproject.toml").is_file()
+            or (root / "setup.py").is_file()
+            or (root / "setup.cfg").is_file()
+            or (root / "tests").is_dir()
+            or any(root.glob("*.py"))
+        )
+        if looks_python:
+            cmd = ["python", "-m", "pytest", "-q", "--no-header", "-x"]
+            if target:
+                cmd.append(target)
+            return cmd
+
+        # JavaScript/TypeScript: only if a real test script is declared, since
+        # npm's default "no test specified" stub exits non-zero and would look
+        # like a genuine failure.
+        package = root / "package.json"
+        if package.is_file():
+            try:
+                import json as _json
+
+                scripts = _json.loads(package.read_text(encoding="utf-8")).get("scripts", {})
+                script = scripts.get("test", "")
+                if script and "no test specified" not in script:
+                    return ["npm", "test", "--silent"]
+            except (ValueError, OSError):
+                pass
+
+        return None
+
     def run_tests(self, target: Optional[str] = None) -> TestResult:
         """Run the repository's pytest suite and capture the outcome.
 
@@ -195,9 +234,12 @@ class RepoWorkspace:
                 summary="Test execution disabled via FLOW_ENABLE_TESTS=0.",
             )
 
-        cmd = ["python", "-m", "pytest", "-q", "--no-header", "-x"]
-        if target:
-            cmd.append(target)
+        cmd = self._test_command(target)
+        if cmd is None:
+            return TestResult(
+                passed=False, exit_code=-1, output="", skipped=True,
+                summary="no recognised test runner for this repository",
+            )
 
         try:
             result = subprocess.run(
