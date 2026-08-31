@@ -27,6 +27,8 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -38,6 +40,12 @@ logger = logging.getLogger("flow.agentic")
 
 MAX_ITERATIONS: int = int(os.getenv("FLOW_MAX_ITERATIONS", "3"))
 AGENTIC_APP_NAME: str = "flow_agent_loop"
+
+# Gemini's free tier rate-limits aggressively; transient 429/503 responses are
+# retried rather than being allowed to burn an iteration.
+MODEL_RETRIES: int = int(os.getenv("FLOW_MODEL_RETRIES", "3"))
+RETRY_BASE_DELAY: float = float(os.getenv("FLOW_RETRY_BASE_DELAY", "10"))
+MAX_RETRY_SLEEP: float = float(os.getenv("FLOW_MAX_RETRY_SLEEP", "65"))
 
 # The tools below are plain module-level functions because the ADK inspects
 # their signatures. They operate on whichever workspace the current loop has
@@ -140,21 +148,29 @@ pytest output carefully, work out why your fix did not satisfy the tests, and
 produce a different, better fix. Do not repeat a patch that already failed.
 
 RULES
-  * Return the COMPLETE corrected file in `patched_content`, not a fragment or
-    a diff. It must be valid, runnable code for the whole file.
+  * Emit the COMPLETE corrected file, not a fragment or a diff. It must be
+    valid, runnable code for the whole file.
   * Preserve existing style, imports, docstrings and unrelated code exactly.
   * Make the minimal change that actually fixes the bug.
   * Never weaken or delete a test to make it pass.
 
-Respond with ONLY a valid JSON object, no prose and no markdown fences:
-{
-  "file_path": "repo/relative/path.py",
-  "root_cause": "why the bug happens",
-  "summary": "one-line description of the fix",
-  "patched_content": "<the complete corrected file>",
-  "confidence": 0.0-1.0
-}
+OUTPUT FORMAT — follow exactly.
+
+First a single-line JSON object of metadata (no file contents in it):
+{"file_path": "repo/relative/path.py", "summary": "one line", "root_cause": "why", "confidence": 0.9}
+
+Then the corrected file, raw, between these exact markers:
+<<<PATCHED_FILE>>>
+...the complete corrected file, verbatim...
+<<<END_PATCHED_FILE>>>
+
+Write the code between the markers exactly as it should appear on disk: no
+escaping, no JSON encoding, no markdown fences, no commentary. Everything
+between the markers is written to the file byte for byte.
 """
+
+PATCH_START = "<<<PATCHED_FILE>>>"
+PATCH_END = "<<<END_PATCHED_FILE>>>"
 
 
 def _build_loop_agent() -> Any:
@@ -174,22 +190,112 @@ def _build_loop_agent() -> Any:
         return None
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Pull a JSON object out of model output, tolerating stray fences."""
-    text = (text or "").strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1]
-        if text.lstrip().lower().startswith("json"):
-            text = text.lstrip()[4:]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("Model returned no JSON object.")
-    return json.loads(text[start : end + 1])
+def _strip_code_fence(body: str) -> str:
+    """Remove a wrapping markdown fence if the model added one anyway."""
+    stripped = body.strip()
+    if not stripped.startswith("```"):
+        return body
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _parse_response(text: str) -> Dict[str, Any]:
+    """Parse the metadata JSON and the raw file body from a model response.
+
+    File contents are carried between literal markers rather than inside a JSON
+    string, because source files routinely contain backslash escapes (regex
+    patterns, Windows paths) that make JSON round-tripping fragile.
+
+    Raises:
+        ValueError: when neither the marker format nor a JSON fallback yields
+            a usable patch.
+    """
+    text = text or ""
+
+    body = ""
+    if PATCH_START in text:
+        after = text.split(PATCH_START, 1)[1]
+        body = after.split(PATCH_END, 1)[0] if PATCH_END in after else after
+        body = _strip_code_fence(body).strip("\r\n")
+        header = text.split(PATCH_START, 1)[0]
+    else:
+        header = text
+
+    # Metadata: first JSON object in the header region.
+    meta: Dict[str, Any] = {}
+    start, end = header.find("{"), header.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            meta = json.loads(header[start : end + 1])
+        except json.JSONDecodeError:
+            meta = {}
+
+    if not body:
+        # Fallback: an older-style JSON payload carrying the content inline.
+        s, e = text.find("{"), text.rfind("}")
+        if s != -1 and e != -1:
+            try:
+                payload = json.loads(text[s : e + 1])
+                body = str(payload.get("patched_content", ""))
+                meta = {**payload, **meta}
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"No {PATCH_START} block and JSON fallback failed: {exc}"
+                ) from exc
+
+    if not body:
+        raise ValueError("Model response contained no patched file content.")
+
+    meta["patched_content"] = body if body.endswith("\n") else body + "\n"
+    return meta
+
+
+def _retry_delay(exc: Exception, attempt: int) -> Optional[float]:
+    """Return how long to wait before retrying, or ``None`` if not retryable.
+
+    Gemini returns 429 (quota) and 503 (overloaded) as transient conditions and
+    often names a concrete ``retryDelay``. Honour that when present, otherwise
+    back off exponentially.
+    """
+    text = str(exc)
+    if "429" not in text and "503" not in text and "RESOURCE_EXHAUSTED" not in text \
+            and "UNAVAILABLE" not in text:
+        return None
+
+    # A daily quota will not recover within a request; do not spin on it.
+    if "PerDay" in text:
+        return None
+
+    match = re.search(r"'retryDelay':\s*'(\d+(?:\.\d+)?)s'", text)
+    if match:
+        return min(float(match.group(1)) + 1.0, MAX_RETRY_SLEEP)
+    return min(RETRY_BASE_DELAY * (2 ** (attempt - 1)), MAX_RETRY_SLEEP)
 
 
 def _run_agent_once(agent: Any, prompt: str) -> str:
+    """Execute one turn of the ADK agent, retrying transient model errors."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, MODEL_RETRIES + 1):
+        try:
+            return _run_agent_turn(agent, prompt)
+        except Exception as exc:  # noqa: BLE001 - classified by _retry_delay
+            last_exc = exc
+            delay = _retry_delay(exc, attempt)
+            if delay is None or attempt == MODEL_RETRIES:
+                raise
+            logger.warning(
+                "Transient model error (attempt %d/%d); retrying in %.0fs.",
+                attempt, MODEL_RETRIES, delay,
+            )
+            time.sleep(delay)
+    raise last_exc if last_exc else RuntimeError("Model call failed.")
+
+
+def _run_agent_turn(agent: Any, prompt: str) -> str:
     """Execute one turn of the ADK agent and return its final text."""
     from google.adk.runners import InMemoryRunner
     from google.genai import types
@@ -265,6 +371,7 @@ def run_agentic_fix(
     error_log: str = "",
     token: Optional[str] = None,
     max_iterations: int = MAX_ITERATIONS,
+    workspace: Optional[RepoWorkspace] = None,
 ) -> AgenticResult:
     """Explore, patch, test, and revise until the suite passes or attempts run out.
 
@@ -275,6 +382,10 @@ def run_agentic_fix(
         error_log: Traceback or CI output.
         token: GitHub token, required for private repositories.
         max_iterations: Maximum propose-verify cycles.
+        workspace: An already-prepared workspace to operate in. When supplied,
+            it is used as-is and left for the caller to clean up. This exists
+            so evaluation harnesses can reconstruct a specific repository state
+            (e.g. a commit with a known bug) before the agent runs.
 
     Returns:
         An :class:`AgenticResult`. ``verified`` is ``True`` only when the
@@ -288,12 +399,14 @@ def run_agentic_fix(
         result.error = "ADK agent unavailable."
         return result
 
-    try:
-        workspace = RepoWorkspace(repo=repo, token=token)
-        workspace.clone()
-    except WorkspaceError as exc:
-        result.error = f"Could not prepare workspace: {exc}"
-        return result
+    caller_owns_workspace = workspace is not None
+    if workspace is None:
+        try:
+            workspace = RepoWorkspace(repo=repo, token=token)
+            workspace.clone()
+        except WorkspaceError as exc:
+            result.error = f"Could not prepare workspace: {exc}"
+            return result
 
     _active_workspace = workspace
     last_failure: Optional[TestResult] = None
@@ -317,7 +430,7 @@ def run_agentic_fix(
 
             try:
                 raw = _run_agent_once(agent, prompt)
-                payload = _extract_json(raw)
+                payload = _parse_response(raw)
             except Exception as exc:  # noqa: BLE001 - keep looping on bad output
                 logger.warning("Attempt %d produced unusable output: %s", attempt, exc)
                 result.iterations.append(
@@ -395,4 +508,5 @@ def run_agentic_fix(
         return result
     finally:
         _active_workspace = None
-        workspace.cleanup()
+        if not caller_owns_workspace:
+            workspace.cleanup()
