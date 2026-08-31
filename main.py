@@ -114,12 +114,17 @@ def verify_github_signature(body: bytes, signature: Optional[str]) -> None:
 # ---------------------------------------------------------------------------
 # Health / metadata
 # ---------------------------------------------------------------------------
+# Google's frontend intercepts /healthz on Cloud Run before it reaches the
+# container, so /health is the canonical probe and /healthz is kept as an
+# alias for local use.
+@app.get("/health", tags=["ops"])
 @app.get("/healthz", tags=["ops"])
 def healthz() -> dict:
-    """Liveness probe for Cloud Run."""
+    """Liveness probe. Reports which backing services are actually live."""
     return {
         "status": "ok",
         "model": flow.GEMINI_MODEL,
+        "state_backend": flow.repository.backend,
         "collection": flow.FIRESTORE_COLLECTION,
         "github_mode": "real" if flow.is_github_configured() else "mock",
         "webhook_signature_verification": bool(GITHUB_WEBHOOK_SECRET),

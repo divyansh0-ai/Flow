@@ -150,6 +150,11 @@ class FirestoreRepository:
                 exc,
             )
 
+    @property
+    def backend(self) -> str:
+        """Which store is actually in use: ``firestore`` or ``in-memory``."""
+        return "firestore" if self._client is not None else "in-memory"
+
     # -- internal helpers ---------------------------------------------------
     @staticmethod
     def _now() -> str:
