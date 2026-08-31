@@ -25,11 +25,13 @@ before taking any outward action. Nothing gets "pushed" until a human says yes.
 2. [Project structure](#2-project-structure)
 3. [Prerequisites](#3-prerequisites)
 4. [Quickstart — run the demo on your laptop](#4-quickstart--run-the-demo-on-your-laptop)
-5. [API reference](#5-api-reference)
-6. [Deploy to Google Cloud Run](#6-deploy-to-google-cloud-run)
-7. [Why this satisfies the challenge](#7-why-this-satisfies-the-challenge)
-8. [Security notes](#8-security-notes)
-9. [Troubleshooting](#9-troubleshooting)
+5. [Real repository mode](#5-real-repository-mode)
+6. [API reference](#6-api-reference)
+7. [Running the tests](#7-running-the-tests)
+8. [Deploy to Google Cloud Run](#8-deploy-to-google-cloud-run)
+9. [Why this satisfies the challenge](#9-why-this-satisfies-the-challenge)
+10. [Security notes](#10-security-notes)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -48,8 +50,8 @@ before taking any outward action. Nothing gets "pushed" until a human says yes.
                             ┌──────────────────────▼───────────────────────┐
                             │            Google ADK Agent                   │
                             │   model: gemini-3.5-flash                     │
-                            │   tools: analyze_error_log, build_unified_diff│
-                            │   output: structured PatchProposal (JSON)     │
+                            │   tools: list_repo_files, read_repo_file    │
+                            │   loop: propose -> run tests -> revise        │
                             └──────────────────────┬───────────────────────┘
                                                    │
                             ┌──────────────────────▼───────────────────────┐
@@ -71,6 +73,63 @@ before taking any outward action. Nothing gets "pushed" until a human says yes.
                             │  Firestore status ──▶ PR_CREATED              │
                             └──────────────────────────────────────────────┘
 ```
+
+### The agentic loop
+
+The agent does not emit a patch and hope. For every task it runs a
+propose → verify → revise cycle inside a disposable clone of the repository:
+
+```
+   clone repo into throwaway workspace
+            │
+            ▼
+   ┌── agent explores with its own tools ──┐
+   │   list_repo_files() / read_repo_file() │   ← gathers its own context
+   └────────────────┬───────────────────────┘
+                    ▼
+            propose corrected file
+                    │
+                    ▼
+          run the repo's real test suite
+                    │
+         ┌──────────┴───────────┐
+      GREEN                   RED
+         │                      │
+         ▼                      ▼
+   verified=True      feed pytest output back
+   → HITL gate        → revise (up to FLOW_MAX_ITERATIONS)
+```
+
+A patch reaches the human reviewer marked `verified=True` **only if the
+repository's own tests actually passed with it applied**. Every attempt is
+recorded, so the reviewer sees what the agent tried and why it failed — not
+just the final answer.
+
+### Evaluated against real, unplanted bugs
+
+Fixing a bug you wrote yourself proves nothing. `evaluate.py` measures the
+agent SWE-bench style: it checks a repository out at a real upstream fix
+commit, reverts **only the source file** to its pre-fix state (keeping the
+maintainer's own regression test), confirms the suite is red, then runs the
+loop.
+
+```bash
+python evaluate.py
+```
+
+Current result — `mahmoud/boltons`, commit [`1e61524`](https://github.com/mahmoud/boltons/commit/1e61524), a real
+`singularize()` bug that corrupted words ending in a double `s`:
+
+| | |
+| --- | --- |
+| Baseline (bug restored) | `1 failed, 303 passed` |
+| After the agent's patch | **`445 passed`** |
+| Attempts needed | 1 |
+| Verdict | **PASS** |
+
+Notably the agent placed its guard at a *different point* in the branch chain
+than the human maintainer did. Same behaviour, independently derived — it
+reasoned about the code rather than reproducing a known patch.
 
 ### State machine
 
@@ -94,6 +153,9 @@ RECEIVED → ANALYZING → PENDING_APPROVAL → APPROVED → PR_CREATED
 flow/
 ├── agent.py            # ADK agent, tools, Firestore repository, orchestration
 ├── main.py              # FastAPI app (webhook + approval endpoints)
+├── agentic.py            # Propose -> run tests -> revise loop (the actual agent)
+├── workspace.py          # Disposable clone the agent edits and tests in
+├── evaluate.py           # SWE-bench-style eval against real upstream bugs
 ├── github_client.py      # Real GitHub REST API client (read files, branch, commit, PR)
 ├── approve_cli.py        # Interactive terminal HITL approval console
 ├── requirements.txt      # Python dependencies
@@ -107,6 +169,9 @@ flow/
 | ------------------- | ------------------------------------------------------------------------ |
 | `agent.py`           | ADK agent, tools, Firestore repository, workflow orchestration          |
 | `main.py`            | FastAPI app: `/webhook/analyze`, `/workflow/approve`, `/workflow/reject`  |
+| `agentic.py`          | The verify-revise loop: propose, run tests, read failures, retry        |
+| `workspace.py`        | Sandboxed clone: read/write files, run pytest, produce diffs            |
+| `evaluate.py`         | SWE-bench-style evaluation against bugs we did not plant                |
 | `github_client.py`    | Real GitHub API: fetch files, create branch, commit patch, open PR      |
 | `approve_cli.py`      | Interactive terminal HITL approval console                              |
 | `requirements.txt`    | Python dependencies                                                     |
@@ -131,6 +196,9 @@ flow/
 | `GITHUB_TOKEN`           | GitHub PAT — **enables real repo mode**      | — (mock PR fallback)   |
 | `GITHUB_WEBHOOK_SECRET`  | HMAC secret for webhook signature checks     | — (verification off)   |
 | `GITHUB_BRANCH_PREFIX`   | Prefix for generated fix branches            | `flow/fix`       |
+| `FLOW_MAX_ITERATIONS`    | Max propose-verify cycles per task           | `3`                    |
+| `FLOW_ENABLE_TESTS`      | Set `0` to disable running repo test suites  | `1`                    |
+| `FLOW_TEST_TIMEOUT`      | Seconds before a test run is killed          | `180`                  |
 | `PORT`                   | Server port (Cloud Run injects this)        | `8080`                 |
 
 ---
@@ -233,7 +301,7 @@ token is redacted on read).
 
 ---
 
-## 4b. Real repository mode
+## 5. Real repository mode
 
 By default the agent runs in **mock mode**: it analyzes whatever `source_code`
 you pass in the webhook and synthesizes a fake PR URL. Setting a
@@ -297,7 +365,7 @@ export GITHUB_WEBHOOK_SECRET="your-random-secret"
 
 ---
 
-## 5. API reference
+## 6. API reference
 
 | Method | Path                | Description                                                         |
 | ------ | -------------------- | ---------------------------------------------------------------------- |
@@ -313,7 +381,32 @@ Full request/response schemas are available live at `/docs` (Swagger) or
 
 ---
 
-## 6. Deploy to Google Cloud Run
+## 7. Running the tests
+
+```bash
+pip install -r requirements.txt
+python -m pytest tests/ -q
+```
+
+The suite covers the state machine, approval-token security (wrong token,
+empty token, replay, cross-task), patch splicing, traceback parsing, and the
+agentic loop's response parsing.
+
+One test — `test_empty_list_does_not_raise` — is **expected to fail** on a
+clean checkout. It targets the deliberate bug in `examples/buggy_stats.py` and
+exists so the agent has a real red test to fix during a demo. Everything else
+should be green.
+
+To evaluate the agent against real upstream bugs instead:
+
+```bash
+python evaluate.py --list      # show available cases
+python evaluate.py             # run them
+```
+
+---
+
+## 8. Deploy to Google Cloud Run
 
 ```bash
 # 0. Set your project + region
@@ -362,7 +455,7 @@ gcloud run deploy flow-agent \
 
 ---
 
-## 7. Why this satisfies the challenge
+## 9. Why this satisfies the challenge
 
 | Requirement                             | Where                                                        |
 | ----------------------------------------- | --------------------------------------------------------------- |
@@ -378,7 +471,7 @@ gcloud run deploy flow-agent \
 
 ---
 
-## 8. Security notes
+## 10. Security notes
 
 - The `approval_token` is a single-use, cryptographically-random secret
   (`secrets.token_urlsafe`) compared in constant time (`secrets.compare_digest`).
@@ -389,7 +482,7 @@ gcloud run deploy flow-agent \
 
 ---
 
-## 9. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom                                                        | Cause / Fix                                                                                                                             |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
