@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flow Agent — Human-in-the-Loop Repo Repair</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel-2:#171d2b; --line:#232b3d;
+    --text:#e6e9f0; --muted:#8b95ad; --accent:#7aa2f7; --accent-2:#9d7cd8;
+    --ok:#7ee787; --warn:#e3b341; --err:#f97583; --add:#1b3a2a; --del:#3a1d24;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  code,pre,.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+  a{color:var(--accent)}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 20px 80px}
+
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:24px;margin:0;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:14px;margin:2px 0 22px}
+
+  .status{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+  .chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);
+        border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12px;color:var(--muted)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.off{background:var(--warn)}
+
+  .grid{display:grid;grid-template-columns:minmax(340px,420px) 1fr;gap:20px;align-items:start}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+  .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+           margin:0 0 14px;font-weight:600}
+
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px;font-weight:500}
+  input,textarea,select{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+        border-radius:8px;padding:9px 11px;font-size:13px;margin-bottom:13px;outline:none}
+  input:focus,textarea:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:74px}
+  textarea.mono{font-size:12px;line-height:1.5}
+
+  button{background:var(--accent);color:#0b0e14;border:0;border-radius:8px;padding:10px 16px;
+         font-size:14px;font-weight:600;cursor:pointer;transition:filter .15s}
+  button:hover:not(:disabled){filter:brightness(1.1)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+  button.ok{background:var(--ok)}
+  button.danger{background:var(--err)}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+
+  .empty{color:var(--muted);text-align:center;padding:52px 20px;font-size:14px}
+  .empty svg{opacity:.35;margin-bottom:12px}
+
+  .badge{display:inline-block;padding:4px 11px;border-radius:999px;font-size:11px;
+         font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+  .b-pending{background:#3a2f12;color:var(--warn)}
+  .b-created{background:#12301f;color:var(--ok)}
+  .b-rejected{background:#3a1d24;color:var(--err)}
+  .b-failed{background:#3a1d24;color:var(--err)}
+
+  .kv{display:grid;grid-template-columns:120px 1fr;gap:7px 14px;font-size:13px;margin:14px 0}
+  .kv dt{color:var(--muted)}
+  .kv dd{margin:0;word-break:break-word}
+
+  pre.diff{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:13px;
+       overflow-x:auto;font-size:12.5px;line-height:1.5;margin:0}
+  pre.diff .a{background:var(--add);color:var(--ok);display:block}
+  pre.diff .d{background:var(--del);color:var(--err);display:block}
+  pre.diff .h{color:var(--accent-2);display:block}
+  pre.diff .c{color:var(--muted);display:block}
+
+  .gate{border:1px solid var(--warn);background:linear-gradient(180deg,#241d0c,#1a1608);
+        border-radius:var(--radius);padding:16px;margin:18px 0}
+  .gate h3{margin:0 0 6px;font-size:15px;color:var(--warn)}
+  .gate p{margin:0 0 13px;font-size:13px;color:var(--muted)}
+
+  .timeline{list-style:none;padding:0;margin:14px 0 0;font-size:13px}
+  .timeline li{display:flex;gap:11px;padding:7px 0;border-left:2px solid var(--line);
+               padding-left:15px;margin-left:5px}
+  .timeline li:last-child{border-left-color:transparent}
+  .timeline .st{font-weight:600;min-width:135px;font-size:12px}
+  .timeline .nt{color:var(--muted);font-size:12px}
+
+  .spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(255,255,255,.25);
+        border-top-color:#0b0e14;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-3px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .note{font-size:12px;color:var(--muted);margin-top:9px}
+  .err{background:#2a1216;border:1px solid var(--err);color:#ffb3bd;padding:11px 13px;
+       border-radius:8px;font-size:13px;margin:12px 0}
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+  .verified{color:var(--ok);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Flow Agent</h1>
+      <div class="sub">Autonomous repo repair with a human approval gate</div>
+    </div>
+    <div class="status" id="status">
+      <span class="chip"><span class="dot" id="d-svc"></span><span id="t-svc">connecting…</span></span>
+      <span class="chip"><span class="dot" id="d-db"></span><span id="t-db">state</span></span>
+      <span class="chip"><span class="dot" id="d-gh"></span><span id="t-gh">github</span></span>
+    </div>
+  </header>
+
+  <div class="grid">
+
+    <!-- ── INPUT ─────────────────────────────── -->
+    <div class="card">
+      <h2>1 · Report a failure</h2>
+
+      <label for="repo">Repository</label>
+      <input id="repo" value="divyansh0-ai/Flow" placeholder="owner/name">
+
+      <label for="title">Issue title</label>
+      <input id="title" value="ZeroDivisionError in calculate_average on empty list">
+
+      <label for="body">Description</label>
+      <textarea id="body">calculate_average([]) crashes instead of returning 0.0 for an empty list.</textarea>
+
+      <label for="log">Stack trace / CI output</label>
+      <textarea id="log" class="mono" rows="5">Traceback (most recent call last):
+  File "examples/buggy_stats.py", line 26, in calculate_average
+    return sum(scores) / len(scores)
+ZeroDivisionError: division by zero</textarea>
+
+      <label for="src">Source (optional — agent fetches from GitHub if blank)</label>
+      <textarea id="src" class="mono" rows="3">def calculate_average(scores):
+    return sum(scores) / len(scores)</textarea>
+
+      <div class="row">
+        <button id="go" onclick="analyze()">Analyze &amp; propose fix</button>
+        <button class="ghost" onclick="loadSample()">Reset</button>
+      </div>
+      <div class="note">The agent diagnoses the bug and drafts a patch. Nothing is written anywhere yet.</div>
+    </div>
+
+    <!-- ── RESULT ────────────────────────────── -->
+    <div class="card" id="out">
+      <h2>2 · Proposed patch &amp; approval</h2>
+      <div class="empty" id="empty">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 2a10 10 0 100 20 10 10 0 000-20z"/><path d="M12 8v5M12 16.5v.01"/>
+        </svg>
+        <div>Submit a failure to see the agent's proposal.</div>
+      </div>
+      <div id="result" style="display:none"></div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let TASK = null;
+
+/* ---------- service status ---------- */
+async function health(){
+  try{
+    const r = await fetch('/health');
+    const h = await r.json();
+    $('d-svc').className = 'dot on';
+    $('t-svc').textContent = h.model || 'online';
+    const fs = h.state_backend === 'firestore';
+    $('d-db').className = 'dot ' + (fs ? 'on' : 'off');
+    $('t-db').textContent = fs ? 'Firestore' : 'in-memory';
+    const gh = h.github_mode === 'real';
+    $('d-gh').className = 'dot ' + (gh ? 'on' : 'off');
+    $('t-gh').textContent = gh ? 'GitHub: live' : 'GitHub: mock';
+  }catch(e){
+    $('d-svc').className = 'dot off';
+    $('t-svc').textContent = 'offline';
+  }
+}
+
+/* ---------- diff rendering ---------- */
+function renderDiff(text){
+  if(!text) return '<span class="c">(no diff)</span>';
+  return text.split('\n').map(l=>{
+    const e = l.replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    if(l.startsWith('+++')||l.startsWith('---')) return `<span class="c">${e}</span>`;
+    if(l.startsWith('@@')) return `<span class="h">${e}</span>`;
+    if(l.startsWith('+')) return `<span class="a">${e}</span>`;
+    if(l.startsWith('-')) return `<span class="d">${e}</span>`;
+    return `<span>${e}</span>`;
+  }).join('');
+}
+
+const badgeFor = s =>
+  ({PENDING_APPROVAL:'b-pending',PR_CREATED:'b-created',
+    REJECTED:'b-rejected',FAILED:'b-failed'}[s] || 'b-pending');
+
+/* ---------- step 1: analyze ---------- */
+async function analyze(){
+  const btn = $('go');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> Analyzing…';
+  $('empty').style.display = 'none';
+  $('result').style.display = '';
+  $('result').innerHTML = '<div class="empty"><span class="spin"></span><br><br>'
+    + 'The agent is reading the code and drafting a fix.<br>'
+    + '<span style="font-size:12px">This can take up to a minute.</span></div>';
+
+  try{
+    const r = await fetch('/webhook/analyze',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        repo:$('repo').value.trim(), issue_title:$('title').value.trim(),
+        issue_body:$('body').value, error_log:$('log').value,
+        source_code:$('src').value
+      })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || ('HTTP '+r.status));
+    TASK = d;
+    showProposal(d);
+  }catch(e){
+    $('result').innerHTML = `<div class="err"><b>Analysis failed.</b><br>${e.message}</div>`;
+  }finally{
+    btn.disabled = false;
+    btn.textContent = 'Analyze & propose fix';
+  }
+}
+
+function showProposal(d){
+  const p = d.patch || {};
+  const verified = p.verified === true;
+  $('result').innerHTML = `
+    <div class="toolbar">
+      <span class="badge ${badgeFor(d.status)}">${d.status.replace(/_/g,' ')}</span>
+      ${verified ? '<span class="verified">✓ tests passed</span>' : ''}
+    </div>
+    <dl class="kv">
+      <dt>Summary</dt><dd>${esc(p.summary)}</dd>
+      <dt>Root cause</dt><dd>${esc(p.root_cause)}</dd>
+      <dt>File</dt><dd class="mono">${esc(p.file_path)}</dd>
+      <dt>Confidence</dt><dd>${p.confidence ?? '—'}</dd>
+      <dt>Task ID</dt><dd class="mono" style="font-size:12px">${esc(d.task_id)}</dd>
+    </dl>
+    <pre class="diff">${renderDiff(p.unified_diff)}</pre>
+
+    <div class="gate">
+      <h3>⏸ Waiting for human approval</h3>
+      <p>The agent has stopped here. No branch, commit, or pull request exists yet —
+         it cannot proceed without your decision.</p>
+      <div class="row">
+        <button class="ok" onclick="decide('approve')">Approve &amp; create PR</button>
+        <button class="danger" onclick="decide('reject')">Reject</button>
+      </div>
+    </div>`;
+}
+
+/* ---------- step 2: the gate ---------- */
+async function decide(action){
+  const g = document.querySelector('.gate');
+  if(g) g.innerHTML = `<h3>${action==='approve'?'Approving':'Rejecting'}…</h3>
+                       <p><span class="spin"></span> Executing the final step.</p>`;
+  try{
+    const r = await fetch('/workflow/'+action,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task_id:TASK.task_id, approval_token:TASK.approval_token,
+                            reason:'Rejected from the console'})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || ('HTTP '+r.status));
+    await showFinal(d);
+  }catch(e){
+    if(g) g.innerHTML = `<div class="err"><b>Action failed.</b><br>${e.message}</div>`;
+  }
+}
+
+async function showFinal(d){
+  let hist = [];
+  try{
+    const t = await (await fetch('/tasks/'+d.task_id)).json();
+    hist = t.history || [];
+  }catch(e){}
+
+  const pr = d.pr_url
+    ? `<dt>Pull request</dt><dd><a href="${esc(d.pr_url)}" target="_blank" rel="noopener">${esc(d.pr_url)}</a></dd>`
+    : '';
+
+  document.querySelector('.gate').outerHTML = `
+    <div class="gate" style="border-color:${d.status==='PR_CREATED'?'var(--ok)':'var(--err)'};
+         background:${d.status==='PR_CREATED'?'linear-gradient(180deg,#0f2618,#0b1a10)':'linear-gradient(180deg,#2a1216,#1a0c0f)'}">
+      <h3 style="color:${d.status==='PR_CREATED'?'var(--ok)':'var(--err)'}">
+        ${d.status==='PR_CREATED'?'✓ Approved — pull request created':'✕ Rejected — nothing was written'}
+      </h3>
+      <dl class="kv">${pr}<dt>Final status</dt><dd>${esc(d.status)}</dd></dl>
+      <div style="font-size:12px;color:var(--muted);margin-top:6px">
+        Audit trail (persisted in Firestore):
+      </div>
+      <ul class="timeline">
+        ${hist.map(h=>`<li><span class="st">${esc(h.status)}</span>
+                        <span class="nt">${esc(h.note)}</span></li>`).join('')}
+      </ul>
+    </div>`;
+  document.querySelector('.toolbar').innerHTML =
+    `<span class="badge ${badgeFor(d.status)}">${d.status.replace(/_/g,' ')}</span>`;
+}
+
+function esc(s){
+  return String(s ?? '—').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function loadSample(){
+  $('repo').value='divyansh0-ai/Flow';
+  $('title').value='ZeroDivisionError in calculate_average on empty list';
+  $('body').value='calculate_average([]) crashes instead of returning 0.0 for an empty list.';
+  $('log').value='Traceback (most recent call last):\n  File "examples/buggy_stats.py", line 26, in calculate_average\n    return sum(scores) / len(scores)\nZeroDivisionError: division by zero';
+  $('src').value='def calculate_average(scores):\n    return sum(scores) / len(scores)';
+  $('result').style.display='none'; $('empty').style.display='';
+}
+
+health();
+</script>
+</body>
+</html>

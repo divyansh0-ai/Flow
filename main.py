@@ -21,10 +21,11 @@ import hashlib
 import hmac
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 import agent as flow
@@ -131,11 +132,22 @@ def healthz() -> dict:
     }
 
 
-@app.get("/", tags=["ops"])
-def root() -> dict:
-    """Human-friendly service banner."""
+@app.get("/", include_in_schema=False)
+def console() -> Response:
+    """Serve the operator console — the human side of the approval gate."""
+    index = Path(__file__).parent / "static" / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    # The API is fully usable without the console; fall back to a banner.
+    return JSONResponse(root_banner())
+
+
+@app.get("/api", tags=["ops"])
+def root_banner() -> dict:
+    """Machine-readable service banner."""
     return {
         "service": "Flow Agent",
+        "console": "/",
         "docs": "/docs",
         "endpoints": ["/webhook/analyze", "/workflow/approve", "/workflow/reject"],
     }

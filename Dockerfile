@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source.
 COPY agent.py main.py agentic.py workspace.py github_client.py ./
+COPY static/ ./static/
 
 # Run as a non-root user (Cloud Run best practice).
 RUN useradd --create-home --uid 1000 appuser \
