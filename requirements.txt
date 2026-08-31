@@ -19,3 +19,6 @@ pydantic>=2.7.0
 
 # Outbound HTTP (webhook callbacks, GitHub API mock)
 requests>=2.32.0
+
+# Test / verification loop
+pytest>=8.0.0
