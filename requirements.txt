@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# Repo Health Taskmaster Agent — Python dependencies
+# ---------------------------------------------------------------------------
+# Core agent framework: Google Agent Development Kit (ADK)
+google-adk>=1.2.0
+
+# Gemini API client (pulled in transitively by google-adk, pinned for safety)
+google-genai>=1.9.0
+
+# Persistent state / audit trail
+google-cloud-firestore>=2.16.0
+
+# Web backend for Cloud Run
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Data validation / typed models
+pydantic>=2.7.0
+
+# Outbound HTTP (webhook callbacks, GitHub API mock)
+requests>=2.32.0
