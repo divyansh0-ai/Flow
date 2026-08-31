@@ -47,7 +47,7 @@ before taking any outward action. Nothing gets "pushed" until a human says yes.
                                                    │
                             ┌──────────────────────▼───────────────────────┐
                             │            Google ADK Agent                   │
-                            │   model: gemini-2.5-pro                       │
+                            │   model: gemini-3.5-flash                     │
                             │   tools: analyze_error_log, build_unified_diff│
                             │   output: structured PatchProposal (JSON)     │
                             └──────────────────────┬───────────────────────┘
@@ -126,7 +126,7 @@ flow/
 | ------------------------ | ------------------------------------------ | ---------------------- |
 | `GOOGLE_API_KEY`         | Gemini API key (or `GEMINI_API_KEY`)        | — (falls back)         |
 | `GOOGLE_CLOUD_PROJECT`   | GCP project id for Firestore                | ADC default            |
-| `GEMINI_MODEL`           | Model name                                  | `gemini-2.5-pro`       |
+| `GEMINI_MODEL`           | Model name                                  | `gemini-3.5-flash`     |
 | `FIRESTORE_COLLECTION`   | Firestore collection name                   | `flow_agent_tasks`    |
 | `GITHUB_TOKEN`           | GitHub PAT — **enables real repo mode**      | — (mock PR fallback)   |
 | `GITHUB_WEBHOOK_SECRET`  | HMAC secret for webhook signature checks     | — (verification off)   |
@@ -340,7 +340,7 @@ gcloud run deploy flow-agent \
   --source . \
   --region "$REGION" \
   --allow-unauthenticated \
-  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GEMINI_MODEL=gemini-2.5-pro" \
+  --set-env-vars "GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GEMINI_MODEL=gemini-3.5-flash" \
   --update-secrets "GOOGLE_API_KEY=gemini-api-key:latest"
 ```
 
